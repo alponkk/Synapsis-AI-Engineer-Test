@@ -7,7 +7,8 @@ Description: Comprehensive data validation and anomaly detection for coal mining
 
 import pandas as pd
 import numpy as np
-import clickhouse_connect
+import psycopg2
+from sqlalchemy import create_engine, text
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Any
@@ -27,15 +28,15 @@ logger = logging.getLogger(__name__)
 
 class DataValidator:
     def __init__(self):
-        """Initialize the data validator with ClickHouse connection"""
-        self.ch_host = os.getenv('CLICKHOUSE_HOST', 'localhost')
-        self.ch_port = int(os.getenv('CLICKHOUSE_PORT', 8123))
-        self.ch_user = os.getenv('CLICKHOUSE_USER', 'default')
-        self.ch_password = os.getenv('CLICKHOUSE_PASSWORD', 'password')
-        self.ch_database = os.getenv('CLICKHOUSE_DB', 'coal_mining')
+        """Initialize the data validator with PostgreSQL connection"""
+        self.pg_host = os.getenv('POSTGRES_HOST', 'localhost')
+        self.pg_port = int(os.getenv('POSTGRES_PORT', 5432))
+        self.pg_user = os.getenv('POSTGRES_USER', 'postgres')
+        self.pg_password = os.getenv('POSTGRES_PASSWORD', 'password')
+        self.pg_database = os.getenv('POSTGRES_DB', 'coal_mining')
         
-        self.client = None
-        self.connect_to_clickhouse()
+        self.engine = None
+        self.connect_to_postgres()
         
         # Validation rules and thresholds
         self.validation_rules = {
@@ -65,19 +66,21 @@ class DataValidator:
             }
         }
 
-    def connect_to_clickhouse(self):
-        """Establish connection to ClickHouse"""
+    def connect_to_postgres(self):
+        """Establish connection to PostgreSQL"""
         try:
-            self.client = clickhouse_connect.get_client(
-                host=self.ch_host,
-                port=self.ch_port,
-                username=self.ch_user,
-                password=self.ch_password,
-                database=self.ch_database
-            )
-            logger.info("Successfully connected to ClickHouse for validation")
+            # Create SQLAlchemy engine
+            connection_string = f"postgresql://{self.pg_user}:{self.pg_password}@{self.pg_host}:{self.pg_port}/{self.pg_database}"
+            self.engine = create_engine(connection_string)
+            
+            # Test connection
+            with self.engine.connect() as conn:
+                result = conn.execute(text("SELECT 1"))
+                result.fetchone()
+            
+            logger.info("Successfully connected to PostgreSQL for validation")
         except Exception as e:
-            logger.error(f"Failed to connect to ClickHouse: {e}")
+            logger.error(f"Failed to connect to PostgreSQL: {e}")
             raise
 
     def validate_table_structure(self, table_name: str) -> Dict[str, Any]:
@@ -94,9 +97,14 @@ class DataValidator:
         }
         
         try:
-            # Get table structure
-            describe_query = f"DESCRIBE {table_name}"
-            structure = self.client.query_df(describe_query)
+            # Get table structure (PostgreSQL syntax)
+            structure_query = f"""
+                SELECT column_name as name 
+                FROM information_schema.columns 
+                WHERE table_name = '{table_name}' 
+                AND table_schema = 'public'
+            """
+            structure = pd.read_sql(structure_query, self.engine)
             
             # Get column names
             existing_columns = structure['name'].tolist()
@@ -112,9 +120,9 @@ class DataValidator:
                     logger.error(f"Missing required fields in {table_name}: {missing_fields}")
             
             # Get record count
-            count_query = f"SELECT count() as total FROM {table_name}"
-            count_result = self.client.query(count_query)
-            validation_result['total_records'] = count_result.result_rows[0][0]
+            count_query = f"SELECT COUNT(*) as total FROM {table_name}"
+            count_result = pd.read_sql(count_query, self.engine)
+            validation_result['total_records'] = int(count_result['total'].iloc[0])
             
             logger.info(f"Table {table_name} has {validation_result['total_records']} records")
             
@@ -148,10 +156,10 @@ class DataValidator:
                 if table_name in ['production_logs', 'weather_data', 'daily_production_metrics']:
                     base_query += f" WHERE date >= '{date_filter}'"
                 elif table_name == 'equipment_sensors':
-                    base_query += f" WHERE toDate(timestamp) >= '{date_filter}'"
+                    base_query += f" WHERE DATE(timestamp) >= '{date_filter}'"
             
             # Get data
-            df = self.client.query_df(base_query)
+            df = pd.read_sql(base_query, self.engine)
             validation_result['records_checked'] = len(df)
             
             if len(df) == 0:
@@ -290,11 +298,11 @@ class DataValidator:
                     fuel_efficiency,
                     weather_impact_score
                 FROM daily_production_metrics
-                WHERE date >= today() - {days_to_check}
+                WHERE date >= CURRENT_DATE - INTERVAL '{days_to_check} days'
                 ORDER BY date
             """
             
-            df = self.client.query_df(query)
+            df = pd.read_sql(query, self.engine)
             
             if len(df) < 7:  # Need at least a week of data
                 logger.warning("Insufficient data for anomaly detection")
@@ -412,7 +420,7 @@ class DataValidator:
                 ORDER BY date
             """
             
-            weather_dates = self.client.query_df(query)
+            weather_dates = pd.read_sql(query, self.engine)
             actual_days = len(weather_dates)
             completeness_result['actual_days'] = actual_days
             

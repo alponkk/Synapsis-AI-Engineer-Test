@@ -8,7 +8,8 @@ Description: Extract, Transform, Load coal mining production data from multiple 
 import os
 import pandas as pd
 import numpy as np
-import clickhouse_connect
+import psycopg2
+from sqlalchemy import create_engine, text
 import requests
 import logging
 from datetime import datetime, timedelta, date
@@ -29,38 +30,42 @@ logger = logging.getLogger(__name__)
 
 class CoalMiningETL:
     def __init__(self):
-        """Initialize the ETL pipeline with ClickHouse connection and configuration"""
-        self.ch_host = os.getenv('CLICKHOUSE_HOST', 'localhost')
-        self.ch_port = int(os.getenv('CLICKHOUSE_PORT', 8123))
-        self.ch_user = os.getenv('CLICKHOUSE_USER', 'default')
-        self.ch_password = os.getenv('CLICKHOUSE_PASSWORD', 'password')
-        self.ch_database = os.getenv('CLICKHOUSE_DB', 'coal_mining')
+        """Initialize the ETL pipeline with PostgreSQL connection and configuration"""
+        self.pg_host = os.getenv('POSTGRES_HOST', 'localhost')
+        self.pg_port = int(os.getenv('POSTGRES_PORT', 5432))
+        self.pg_user = os.getenv('POSTGRES_USER', 'postgres')
+        self.pg_password = os.getenv('POSTGRES_PASSWORD', 'password')
+        self.pg_database = os.getenv('POSTGRES_DB', 'coal_mining')
         
         # Weather API configuration
-        self.weather_api_url = "https://api.open-meteo.com/v1/forecast"
+        self.weather_forecast_url = "https://api.open-meteo.com/v1/forecast"
+        self.weather_historical_url = "https://api.open-meteo.com/v1/historical-weather"
         self.latitude = 2.0167
         self.longitude = 117.3000
         
-        self.client = None
-        self.connect_to_clickhouse()
+        self.engine = None
+        self.connection = None
+        self.connect_to_postgres()
 
-    def connect_to_clickhouse(self):
-        """Establish connection to ClickHouse"""
+    def connect_to_postgres(self):
+        """Establish connection to PostgreSQL"""
         try:
-            self.client = clickhouse_connect.get_client(
-                host=self.ch_host,
-                port=self.ch_port,
-                username=self.ch_user,
-                password=self.ch_password,
-                database=self.ch_database
-            )
-            logger.info("Successfully connected to ClickHouse")
+            # Create SQLAlchemy engine
+            connection_string = f"postgresql://{self.pg_user}:{self.pg_password}@{self.pg_host}:{self.pg_port}/{self.pg_database}"
+            self.engine = create_engine(connection_string)
+            
+            # Test connection
+            with self.engine.connect() as conn:
+                result = conn.execute(text("SELECT 1"))
+                result.fetchone()
+            
+            logger.info("Successfully connected to PostgreSQL")
         except Exception as e:
-            logger.error(f"Failed to connect to ClickHouse: {e}")
+            logger.error(f"Failed to connect to PostgreSQL: {e}")
             raise
 
     def extract_production_data(self) -> pd.DataFrame:
-        """Extract production data from SQL file and load to ClickHouse"""
+        """Extract production data from SQL file and load to PostgreSQL"""
         logger.info("Extracting production data from SQL file")
         
         try:
@@ -84,10 +89,19 @@ class CoalMiningETL:
                     'operational_status': values[4]
                 })
             
-            # Load mines data to ClickHouse
+            # Load mines data to PostgreSQL (truncate first due to foreign key constraints)
             if mines_data:
                 mines_df = pd.DataFrame(mines_data)
-                self.client.insert('mines', mines_df.values.tolist(), column_names=mines_df.columns.tolist())
+                
+                # Truncate tables with foreign key relationships in proper order
+                with self.engine.connect() as conn:
+                    # First truncate dependent tables
+                    conn.execute(text("TRUNCATE TABLE production_logs CASCADE"))
+                    # Then truncate the referenced table
+                    conn.execute(text("TRUNCATE TABLE mines CASCADE"))
+                    conn.commit()
+                
+                mines_df.to_sql('mines', self.engine, if_exists='append', index=False, method='multi')
                 logger.info(f"Loaded {len(mines_data)} mine records")
             
             # Parse INSERT statements for production logs
@@ -105,15 +119,13 @@ class CoalMiningETL:
                     'quality_grade': float(values[4])
                 })
             
-            # Load production data to ClickHouse
+            # Load production data to PostgreSQL
             if production_data:
                 production_df = pd.DataFrame(production_data)
-                # Add log_id as auto-increment
-                production_df['log_id'] = range(1, len(production_df) + 1)
-                # Reorder columns
-                production_df = production_df[['log_id', 'date', 'mine_id', 'shift', 'tons_extracted', 'quality_grade']]
+                # PostgreSQL will auto-generate log_id with SERIAL, so we don't include it
+                production_df = production_df[['date', 'mine_id', 'shift', 'tons_extracted', 'quality_grade']]
                 
-                self.client.insert('production_logs', production_df.values.tolist(), column_names=production_df.columns.tolist())
+                production_df.to_sql('production_logs', self.engine, if_exists='append', index=False, method='multi')
                 logger.info(f"Loaded {len(production_data)} production log records")
                 
                 return production_df
@@ -136,8 +148,12 @@ class CoalMiningETL:
             # Convert maintenance_alert to boolean
             sensor_df['maintenance_alert'] = sensor_df['maintenance_alert'].astype(bool)
             
-            # Load to ClickHouse
-            self.client.insert('equipment_sensors', sensor_df.values.tolist(), column_names=sensor_df.columns.tolist())
+            # Load to PostgreSQL (truncate first for full load)
+            with self.engine.connect() as conn:
+                conn.execute(text("TRUNCATE TABLE equipment_sensors"))
+                conn.commit()
+            
+            sensor_df.to_sql('equipment_sensors', self.engine, if_exists='append', index=False, method='multi')
             logger.info(f"Loaded {len(sensor_df)} sensor records")
             
             return sensor_df
@@ -147,27 +163,44 @@ class CoalMiningETL:
             raise
 
     def extract_weather_data(self, start_date: str, end_date: str) -> pd.DataFrame:
-        """Extract weather data from Open-Meteo API"""
+        """Extract weather data from Open-Meteo API (historical or forecast)"""
         logger.info(f"Extracting weather data from {start_date} to {end_date}")
         
         weather_data = []
         current_date = datetime.strptime(start_date, '%Y-%m-%d')
         end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        today = datetime.now().date()
         
         while current_date <= end_dt:
             date_str = current_date.strftime('%Y-%m-%d')
+            current_date_obj = current_date.date()
             
             try:
-                params = {
-                    'latitude': self.latitude,
-                    'longitude': self.longitude,
-                    'daily': 'temperature_2m_mean,precipitation_sum',
-                    'timezone': 'Asia/Jakarta',
-                    'start_date': date_str,
-                    'end_date': date_str
-                }
+                # Determine which API endpoint to use based on date
+                if current_date_obj <= today:
+                    # Use historical API for past dates
+                    api_url = self.weather_historical_url
+                    params = {
+                        'latitude': self.latitude,
+                        'longitude': self.longitude,
+                        'daily': 'temperature_2m_mean,precipitation_sum',
+                        'timezone': 'Asia/Jakarta',
+                        'start_date': date_str,
+                        'end_date': date_str
+                    }
+                else:
+                    # Use forecast API for future dates
+                    api_url = self.weather_forecast_url
+                    params = {
+                        'latitude': self.latitude,
+                        'longitude': self.longitude,
+                        'daily': 'temperature_2m_mean,precipitation_sum',
+                        'timezone': 'Asia/Jakarta',
+                        'start_date': date_str,
+                        'end_date': date_str
+                    }
                 
-                response = requests.get(self.weather_api_url, params=params, timeout=10)
+                response = requests.get(api_url, params=params, timeout=10)
                 response.raise_for_status()
                 
                 data = response.json()
@@ -180,6 +213,9 @@ class CoalMiningETL:
                         'precipitation_sum': data['daily']['precipitation_sum'][0],
                         'timezone': data['timezone']
                     })
+                    logger.debug(f"Successfully fetched weather data for {date_str}")
+                else:
+                    raise ValueError("No weather data returned from API")
                     
             except Exception as e:
                 logger.warning(f"Failed to fetch weather data for {date_str}: {e}")
@@ -188,7 +224,7 @@ class CoalMiningETL:
                     'date': date_str,
                     'latitude': self.latitude,
                     'longitude': self.longitude,
-                    'temperature_mean': 26.0,  # Default temperature
+                    'temperature_mean': 26.0,  # Default temperature for Kalimantan
                     'precipitation_sum': 0.0,  # Default no rain
                     'timezone': 'Asia/Jakarta'
                 })
@@ -199,8 +235,12 @@ class CoalMiningETL:
             weather_df = pd.DataFrame(weather_data)
             weather_df['date'] = pd.to_datetime(weather_df['date']).dt.date
             
-            # Load to ClickHouse
-            self.client.insert('weather_data', weather_df.values.tolist(), column_names=weather_df.columns.tolist())
+            # Load to PostgreSQL (truncate first for full load)
+            with self.engine.connect() as conn:
+                conn.execute(text("TRUNCATE TABLE weather_data"))
+                conn.commit()
+            
+            weather_df.to_sql('weather_data', self.engine, if_exists='append', index=False, method='multi')
             logger.info(f"Loaded {len(weather_df)} weather records")
             
             return weather_df
@@ -250,17 +290,17 @@ class CoalMiningETL:
         logger.info("Transforming data to generate metrics")
         
         try:
-            # Get data from ClickHouse
+            # Get data from PostgreSQL
             production_query = """
                 SELECT date, mine_id, shift, tons_extracted, quality_grade
                 FROM production_logs
                 ORDER BY date, mine_id, shift
             """
-            production_df = self.client.query_df(production_query)
+            production_df = pd.read_sql(production_query, self.engine)
             
             sensor_query = """
                 SELECT 
-                    toDate(timestamp) as date,
+                    DATE(timestamp) as date,
                     equipment_id,
                     status,
                     fuel_consumption,
@@ -268,14 +308,14 @@ class CoalMiningETL:
                 FROM equipment_sensors
                 ORDER BY timestamp
             """
-            sensor_df = self.client.query_df(sensor_query)
+            sensor_df = pd.read_sql(sensor_query, self.engine)
             
             weather_query = """
                 SELECT date, temperature_mean, precipitation_sum
                 FROM weather_data
                 ORDER BY date
             """
-            weather_df = self.client.query_df(weather_query)
+            weather_df = pd.read_sql(weather_query, self.engine)
             
             # Validate and clean production data
             production_df, anomaly_flags = self.validate_and_clean_data(production_df)
@@ -398,7 +438,7 @@ class CoalMiningETL:
         return validation_errors
 
     def load_data(self, df: pd.DataFrame):
-        """Load the transformed data into ClickHouse"""
+        """Load the transformed data into PostgreSQL"""
         logger.info("Loading data into daily_production_metrics table")
         
         try:
@@ -410,8 +450,8 @@ class CoalMiningETL:
                 for i, row in df.iterrows():
                     df.at[i, 'anomaly_flags'] = df.at[i, 'anomaly_flags'] + validation_errors
             
-            # Prepare data for ClickHouse
-            # Convert date column to string for ClickHouse compatibility
+            # Prepare data for PostgreSQL
+            # Convert date column to string for PostgreSQL compatibility
             df_to_load = df.copy()
             df_to_load['date'] = df_to_load['date'].astype(str)
             
@@ -425,18 +465,14 @@ class CoalMiningETL:
             # Select and reorder columns
             df_final = df_to_load[required_columns].copy()
             
-            # Clear existing data for the date range
-            min_date = df_final['date'].min()
-            max_date = df_final['date'].max()
-            
-            delete_query = f"""
-                ALTER TABLE daily_production_metrics 
-                DELETE WHERE date >= '{min_date}' AND date <= '{max_date}'
-            """
-            self.client.command(delete_query)
+            # Full load: Truncate all existing data first (PostgreSQL syntax)
+            with self.engine.connect() as conn:
+                truncate_query = text("TRUNCATE TABLE daily_production_metrics")
+                conn.execute(truncate_query)
+                conn.commit()
             
             # Insert new data
-            self.client.insert('daily_production_metrics', df_final.values.tolist(), column_names=df_final.columns.tolist())
+            df_final.to_sql('daily_production_metrics', self.engine, if_exists='append', index=False, method='multi')
             
             logger.info(f"Successfully loaded {len(df_final)} records into daily_production_metrics")
             
@@ -447,22 +483,15 @@ class CoalMiningETL:
     def log_data_quality_issue(self, table_name: str, anomaly_type: str, description: str, affected_records: int, severity: str):
         """Log data quality issues to the data_quality_log table"""
         try:
-            # Get next ID
-            max_id_query = "SELECT max(id) as max_id FROM data_quality_log"
-            result = self.client.query(max_id_query)
-            max_id = result.result_rows[0][0] if result.result_rows and result.result_rows[0][0] is not None else 0
-            next_id = max_id + 1
-            
-            log_data = [{
-                'id': next_id,
+            log_data = pd.DataFrame([{
                 'table_name': table_name,
                 'anomaly_type': anomaly_type,
                 'description': description,
                 'affected_records': affected_records,
                 'severity': severity
-            }]
+            }])
             
-            self.client.insert('data_quality_log', [list(log_data[0].values())], column_names=list(log_data[0].keys()))
+            log_data.to_sql('data_quality_log', self.engine, if_exists='append', index=False, method='multi')
             
         except Exception as e:
             logger.error(f"Error logging data quality issue: {e}")

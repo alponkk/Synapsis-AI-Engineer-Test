@@ -1,24 +1,17 @@
-version: '3.8'
-
 services:
-  clickhouse:
-    image: clickhouse/clickhouse-server:23.12
-    hostname: clickhouse
+  postgres:
+    image: postgres:15-alpine
+    hostname: postgres
     ports:
-      - "8123:8123"  # HTTP interface
-      - "9000:9000"  # Native interface
+      - "5432:5432"  # PostgreSQL port
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse-config:/etc/clickhouse-server/config.d
+      - postgres_data:/var/lib/postgresql/data
       - ./init-scripts:/docker-entrypoint-initdb.d
     environment:
-      CLICKHOUSE_DB: coal_mining
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: password
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
+      POSTGRES_DB: coal_mining
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      PGDATA: /var/lib/postgresql/data/pgdata
     networks:
       - coal_mining_network
 
@@ -34,7 +27,7 @@ services:
       MB_DB_FILE: /metabase-data/metabase.db
       JAVA_OPTS: "-Xmx2g"
     depends_on:
-      - clickhouse
+      - postgres
     networks:
       - coal_mining_network
 
@@ -46,24 +39,23 @@ services:
       - .:/app
       - ./logs:/app/logs
     environment:
-      CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_PORT: 8123
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: password
-      CLICKHOUSE_DB: coal_mining
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: coal_mining
     depends_on:
-      - clickhouse
+      - postgres
     networks:
       - coal_mining_network
     command: >
       sh -c "
-        echo 'Waiting for ClickHouse to be ready...' &&
-        sleep 30 &&
-        python etl_pipeline.py
+        echo 'ETL Runner ready. Use docker-compose exec etl_runner python python_scripts/etl_pipeline.py to run ETL manually' &&
+        tail -f /dev/null
       "
 
 volumes:
-  clickhouse_data:
+  postgres_data:
   metabase_data:
 
 networks:
