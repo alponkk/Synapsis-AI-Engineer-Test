@@ -69,6 +69,13 @@ coal-mining-pipeline/
 ├── python_scripts/                # Python scripts directory
 │   ├── etl_pipeline.py            # Main ETL script
 │   └── data_validation.py         # Data quality validation
+├── forecasting/                   # Machine Learning forecasting
+│   ├── production_forecasting.py  # Main forecasting script
+│   ├── test_forecasting.py       # Environment test script
+│   ├── models/                    # Trained ML models
+│   ├── results/                   # Model results and reports
+│   ├── visualizations/           # Generated plots and charts
+│   └── data/                     # Forecasting data cache
 ├── init-scripts/                  # Database initialization
 │   └── 01_create_database.sql
 ├── synapsis ai engineer challege datasets/
@@ -111,6 +118,25 @@ docker-compose exec etl_runner python python_scripts/etl_pipeline.py
 
 # Run data validation manually
 docker-compose exec etl_runner python python_scripts/data_validation.py
+```
+
+### Complete Pipeline Execution
+Run the entire pipeline from ETL to forecasting in one command:
+
+```bash
+# Run complete pipeline (ETL → Validation → Forecasting)
+docker-compose exec etl_runner python run_complete_pipeline.py
+```
+
+### Production Forecasting
+Run machine learning models to forecast daily coal production:
+
+```bash
+# Run forecasting pipeline (requires ETL to be completed first)
+docker-compose exec etl_runner python forecasting/production_forecasting.py
+
+# Test forecasting environment
+docker-compose exec etl_runner python forecasting/test_forecasting.py
 ```
 
 ### Accessing Metabase Dashboard
@@ -387,5 +413,99 @@ docker-compose exec postgres psql -U postgres -d coal_mining -c "SELECT * FROM p
 - Comprehensive technical documentation
 - Git version control
 - Reproducible deployment process
+
+## 🤖 Production Forecasting
+
+### Overview
+The forecasting module uses machine learning to predict `total_production_daily` based on operational metrics and environmental factors. It implements multiple algorithms with comprehensive feature engineering and hyperparameter tuning.
+
+### Machine Learning Models
+The system trains and compares the following models:
+
+1. **Linear Regression** - Baseline linear model
+2. **Ridge Regression** - L2 regularized linear model  
+3. **Random Forest** - Ensemble tree-based model
+4. **Gradient Boosting** - Gradient boosting regressor
+5. **Support Vector Regression** - SVM for regression
+6. **XGBoost** - Advanced gradient boosting (if available)
+
+### Features Used
+- **Primary Features:**
+  - `average_quality_grade` - Coal quality assessment
+  - `equipment_utilization` - Operational efficiency percentage
+  - `fuel_efficiency` - Fuel consumption per ton
+  - `weather_impact_score` - Weather influence on operations
+
+- **Engineered Features:**
+  - Lag features (1, 2, 3, 7 days)
+  - Rolling statistics (3, 7, 14-day windows)
+  - Date/time features (month, day, week, weekend)
+  - Interaction features (quality × utilization, efficiency × weather)
+  - Polynomial features (squared, log transformations)
+  - Weather deviation metrics
+
+### Model Training Process
+1. **Data Loading** - Extract from `daily_production_metrics` table
+2. **Exploratory Data Analysis** - Statistical analysis and visualizations
+3. **Feature Engineering** - Create 20+ predictive features
+4. **Data Splitting** - Time-based train/test split (80/20)
+5. **Model Training** - Train multiple models with hyperparameter tuning
+6. **Cross-Validation** - Time series cross-validation (5 folds)
+7. **Performance Evaluation** - Compare models using RMSE, MAE, R², MAPE
+8. **Results Export** - Save models, visualizations, and reports
+
+### Hyperparameter Tuning
+- **Grid Search** - Exhaustive search for small parameter spaces
+- **Randomized Search** - Efficient search for large parameter spaces
+- **Time Series CV** - Proper validation for temporal data
+- **Metrics Optimization** - Minimize MSE, maximize R²
+
+### Output Files
+```
+forecasting/
+├── models/                     # Trained models (.joblib files)
+│   ├── linear_regression_model.joblib
+│   ├── random_forest_model.joblib
+│   └── ...
+├── results/                    # Performance metrics and reports
+│   ├── model_results.json      # Detailed performance metrics
+│   ├── forecasting_report.md   # Comprehensive analysis report
+│   ├── feature_names.json      # Feature definitions
+│   └── forecasting.log         # Execution logs
+└── visualizations/            # Generated charts and plots
+    ├── eda_analysis.png        # Exploratory data analysis
+    ├── model_performance_comparison.png  # Model comparison charts
+    └── prediction_plots.png     # Actual vs predicted plots
+```
+
+### Usage Example
+```bash
+# Ensure ETL pipeline has been executed first
+docker-compose exec etl_runner python python_scripts/etl_pipeline.py
+
+# Run forecasting pipeline
+docker-compose exec etl_runner python forecasting/production_forecasting.py
+
+# Check results
+docker-compose exec etl_runner ls forecasting/results/
+docker-compose exec etl_runner ls forecasting/visualizations/
+```
+
+### Performance Metrics
+The system evaluates models using:
+- **RMSE** (Root Mean Square Error) - Lower is better
+- **MAE** (Mean Absolute Error) - Lower is better  
+- **R²** (R-squared) - Higher is better (max 1.0)
+- **MAPE** (Mean Absolute Percentage Error) - Lower is better
+
+### Key Features
+✅ **Advanced Feature Engineering** - 20+ engineered features from 4 base features
+✅ **Multiple ML Algorithms** - 5-6 different model types for comparison
+✅ **Hyperparameter Tuning** - Automated optimization for all models
+✅ **Time Series Validation** - Proper temporal cross-validation
+✅ **Comprehensive EDA** - Statistical analysis and visualizations
+✅ **Model Persistence** - Save and load trained models
+✅ **Performance Visualization** - Detailed charts and comparison plots
+✅ **Automated Reporting** - Generated markdown reports with insights
 
 This project is part of the Synapsis AI Engineer Technical Challenge.

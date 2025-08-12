@@ -50,7 +50,12 @@ services:
       - coal_mining_network
     command: >
       sh -c "
-        echo 'ETL Runner ready. Use docker-compose exec etl_runner python python_scripts/etl_pipeline.py to run ETL manually' &&
+        echo 'ETL Runner ready. Available commands:' &&
+        echo '  Complete Pipeline: docker-compose exec etl_runner python run_complete_pipeline.py' &&
+        echo '  ETL Pipeline: docker-compose exec etl_runner python python_scripts/etl_pipeline.py' &&
+        echo '  Data Validation: docker-compose exec etl_runner python python_scripts/data_validation.py' &&
+        echo '  Forecasting: docker-compose exec etl_runner python forecasting/production_forecasting.py' &&
+        echo '  Test Forecasting: docker-compose exec etl_runner python forecasting/test_forecasting.py' &&
         tail -f /dev/null
       "
 
